@@ -174,7 +174,7 @@ class PaymentTransactionStripe:
                 'exp_month': card_info.expiry_month,
                 'exp_year': card_info.expiry_year,
                 'cvc': card_info.csc,
-                'name': card_info.owner or self.address.name or self.party.name
+                'name': card_info.owner,
             }
             charge_data['source'].update(self.address.get_address_for_stripe())
 
@@ -293,9 +293,7 @@ class AddPaymentProfile:
                 'exp_month': card_info.expiry_month,
                 'exp_year': card_info.expiry_year,
                 'cvc': card_info.csc,
-                'name': (
-                    card_info.owner or self.address.name or self.party.name
-                ),
+                'name': card_info.owner,
             },
         }
         profile_data['source'].update(
