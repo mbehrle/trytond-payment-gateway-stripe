@@ -7,7 +7,10 @@
 """
 from decimal import Decimal
 
+import stripe
 import pytest
+# Importing transaction directly causes cyclic dependency in 3.6
+from trytond.tools.singleton import Singleton  # noqa
 from trytond.transaction import Transaction
 from trytond.exceptions import UserError
 from trytond.config import config
@@ -355,7 +358,7 @@ class TestPaymentGateway:
         assert transaction1.state == 'posted'
 
         assert data.customer.payable == Decimal('0')
-        assert data.customer.receivable == -Decimal('10')
+        assert data.customer.receivable == -Decimal('10.1')
 
         refund_transaction = transaction1.create_refund()
 
@@ -365,3 +368,32 @@ class TestPaymentGateway:
         assert refund_transaction.state == 'posted'
         assert data.customer.payable == Decimal('0')
         assert data.customer.receivable == Decimal('0')
+
+    def test_create_stripe_profile(self, dataset, transaction):
+        """
+        Test 'create_stripe_profile' method which should create
+        a payment profile and return its id
+        """
+        PaymentProfile = self.POOL.get('party.payment_profile')
+        data = dataset()
+
+        stripe.api_key = data.stripe_gateway.stripe_api_key
+        token = stripe.Token.create(card={
+            "number": '4242424242424242',
+            "exp_month": 9,
+            "exp_year": 2020,
+            "cvc": '123'
+        })
+
+        payment_profile_id = PaymentProfile.create_profile_using_stripe_token(
+            data.customer.id, data.stripe_gateway.id, token
+        )
+        payment_profile = PaymentProfile(payment_profile_id)
+
+        assert isinstance(payment_profile_id, int)
+        assert payment_profile.party.id == data.customer.id
+        assert payment_profile.gateway == data.stripe_gateway
+        assert payment_profile.last_4_digits == '4242'
+        assert payment_profile.expiry_month == '09'
+        assert payment_profile.expiry_year == '2020'
+        assert payment_profile.stripe_customer_id is not None
