@@ -10,6 +10,10 @@ msgctxt "field:payment_gateway.gateway,stripe_api_key:"
 msgid "Stripe API Key"
 msgstr "Stripe API Schlüssel"
 
+msgctxt "field:payment_gateway.gateway,stripe_publishable_key:"
+msgid "Stripe Publishable Key"
+msgstr "Stripe öffentlicher Schlüssel"
+
 msgctxt "view:payment_gateway.gateway:"
 msgid "Stripe Settings"
 msgstr "Stripe Einstellungen"
