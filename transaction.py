@@ -257,7 +257,7 @@ class PaymentTransactionStripe:
         try:
             refund = stripe.Refund.create(
                 charge=self.origin.provider_reference,
-                amount=int(self.amount * 100),  # Amount is in cents
+                amount=abs(int(self.amount * 100)),  # Amount is in cents
             )
         except (
             stripe.error.InvalidRequestError,
