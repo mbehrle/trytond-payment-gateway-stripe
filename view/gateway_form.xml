@@ -4,6 +4,8 @@
         <page string="Stripe Settings" id="stripe">
             <label name="stripe_api_key" />
             <field name="stripe_api_key" widget="password" />
+            <label name="stripe_publishable_key" />
+            <field name="stripe_publishable_key" widget="password" />
         </page>
     </xpath>
 </data>
