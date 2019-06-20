@@ -6,6 +6,14 @@
             <field name="stripe_api_key" widget="password" />
             <label name="stripe_publishable_key" />
             <field name="stripe_publishable_key" widget="password" />
+            <label name="stripe_webhook_endpoint" />
+            <field name="stripe_webhook_endpoint" />
+            <button name="new_identifier"/>
+            <newline/>
+            <label name="stripe_webhook_signature_secret_key" />
+            <field name="stripe_webhook_signature_secret_key" widget="password" />
+            <label name="stripe_check_zip_code" />
+            <field name="stripe_check_zip_code" />
         </page>
     </xpath>
 </data>

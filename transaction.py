@@ -5,13 +5,21 @@
     :copyright: (c) 2015 by Fulfil.IO Inc.
     :license: see LICENSE for more details.
 """
+import urllib
+import uuid
+
+from operator import attrgetter
+from decimal import Decimal
+from itertools import groupby
+
 from trytond.pool import Pool, PoolMeta
 from trytond.pyson import Eval, Bool, Not
-from trytond.model import fields
+from trytond.model import ModelView, fields
 from trytond.exceptions import UserError
+from trytond.url import HOSTNAME
 
 import stripe
-stripe.api_version = '2017-06-05'
+stripe.api_version = '2019-05-16'
 
 __metaclass__ = PoolMeta
 __all__ = [
@@ -19,25 +27,45 @@ __all__ = [
     'AddPaymentProfile'
 ]
 
+STATES = {
+    'invisible': Eval('provider') != 'stripe',
+    'readonly': Not(Bool(Eval('active'))),
+    }
+STATESR = {
+        'required': Eval('provider') == 'stripe',
+        }
+STATESR.update(STATES)
+DEPENDS = ['provider', 'active']
+
 
 class PaymentGatewayStripe:
     "Stripe Gateway Implementation"
     __name__ = 'payment_gateway.gateway'
 
-    stripe_api_key = fields.Char(
-        'Stripe API Key', states={
-            'required': Eval('provider') == 'stripe',
-            'invisible': Eval('provider') != 'stripe',
-            'readonly': Not(Bool(Eval('active'))),
-        }, depends=['provider', 'active']
-    )
+    stripe_api_key = fields.Char('Stripe API Key',
+        states=STATESR, depends=DEPENDS)
+    stripe_publishable_key = fields.Char('Stripe Publishable Key',
+        states=STATESR, depends=DEPENDS)
+    stripe_webhook_identifier = fields.Char('Webhook Identifier', readonly=True)
+    stripe_webhook_endpoint = fields.Function(fields.Char('Webhook Endpoint',
+            help='The Webhook endpoint called by Stripe.'),
+        'on_change_with_stripe_webhook_endpoint')
+    stripe_webhook_signature_secret_key = fields.Char(
+        'Webhook Signature Secret Key',
+        states=STATES, depends=DEPENDS)
+    stripe_check_zip_code = fields.Boolean('Check Zip Code',
+        states=STATES, depends=DEPENDS)
 
-    stripe_publishable_key = fields.Char(
-        'Stripe Publishable Key', states={
-            'invisible': Eval('provider') != 'stripe',
-            'readonly': Not(Bool(Eval('active'))),
-        }, depends=['provider', 'active']
-    )
+    @classmethod
+    def __setup__(cls):
+        super(PaymentGatewayStripe, cls).__setup__()
+        cls._buttons.update({
+                'new_identifier': {
+                    'icon': 'tryton-refresh',
+                    },
+                })
+        if Pool().test:
+            cls.__rpc__['webhook'] = RPC(readonly=False, instantiate=0)
 
     @classmethod
     def get_providers(cls, values=None):
@@ -65,131 +93,141 @@ class PaymentGatewayStripe:
             }
         )]
 
+    @classmethod
+    @ModelView.button
+    def new_identifier(cls, gateways):
+        for gateway in gateways:
+            gateway.webhook_identifier = uuid.uuid4().hex
+        cls.save(gateways)
+
+    @fields.depends('stripe_webhook_identifier')
+    def on_change_with_stripe_webhook_endpoint(self, name=None):
+        if not self.stripe_webhook_identifier:
+            return ''
+        # TODO add basic authentication support
+        url_part = {
+            'hook_path': '/checkout/webhook/stripe',
+            'identifier': self.stripe_webhook_identifier,
+            }
+        return 'https://' + HOSTNAME + '/<default_locale>' + (
+            urllib.pathname2url(
+                '%(hook_path)s/%(identifier)s'
+                % url_part))
+
 
 class PaymentTransactionStripe:
     """
     Payment Transaction implementation for Stripe
     """
     __name__ = 'payment_gateway.transaction'
+    stripe_amount = fields.Function(
+        fields.Integer("Stripe Amount"),
+        'get_stripe_amount', setter='set_stripe_amount')
 
-    @property
-    def stripe_amount(self):
+    def get_stripe_amount(self, name):
         """
         Stripe requires amounts in currencies that support decimals to be
         multiplied by 100 while the other ones sent as such.
 
         https://stripe.com/docs/currencies#zero-decimal
+
         """
-        if self.currency.code in (
-                'BIF', 'XAF', 'XPF', 'CLP',
-                'KMF', 'DJF', 'GNF', 'JPY',
-                'MGA', 'PYG', 'RWF', 'KRW',
-                'VUV', 'VND', 'XOF'):
-            return int(self.amount)
-        return int(self.amount * 100)
+        #if self.currency.code in (
+        #        'BIF', 'XAF', 'XPF', 'CLP',
+        #        'KMF', 'DJF', 'GNF', 'JPY',
+        #        'MGA', 'PYG', 'RWF', 'KRW',
+        #        'VUV', 'VND', 'XOF'):
+        #    return int(self.amount)
+        print(self.currency_digits)
+        print(10 ** self.currency_digits)
+        print(int(self.amount * 10 ** self.currency_digits))
+        return int(self.amount * 10 ** self.currency_digits)
+
+    @classmethod
+    def set_stripe_amount(cls, transactions, name, value):
+        keyfunc = attrgetter('currency_digits')
+        transactions = sorted(transactions, key=keyfunc)
+        value = Decimal(value)
+        for digits, transactions in groupby(transactions, keyfunc):
+            digits = Decimal(digits)
+            cls.write(list(transactions), {
+                    'amount': value * 10 ** -digits,
+                    })
+
+    def create_payment_intent_stripe(self):
+        """
+        Create a payment intent.
+
+        20190613:
+            - Migrate to the PaymentIntent-Api needed
+              for SCA conformity.
+        """
+        TransactionLog = Pool().get('payment_gateway.transaction.log')
+
+        stripe.api_key = self.gateway.stripe_api_key
+
+        payload = {
+            'amount': self.stripe_amount,
+            'currency': self.currency.code.lower(),
+            'capture_method': 'automatic',
+            'payment_method_types': ['card'],
+            }
+
+        try:
+            intent = stripe.PaymentIntent.create(**payload)
+            print(intent)
+        except (
+            stripe.error.CardError, stripe.error.InvalidRequestError,
+            stripe.error.AuthenticationError, stripe.error.APIConnectionError,
+            stripe.error.StripeError
+        ), exc:
+            self.state = 'failed'
+            self.save()
+            TransactionLog.serialize_and_create(self, exc.json_body)
+        else:
+            self.provider_reference = intent['id']
+            self.provider_token = intent['client_secret']
+            self.approval_url = intent['charges'].get('url', None)
+            self.save()
+            TransactionLog.create([{
+                'transaction': self,
+                'log': unicode(intent),
+            }])
 
     def authorize_stripe(self, card_info=None):
         """
         Authorize using stripe.
+
+        20190613:
+            - just set the state for compatibility behavior, we charge
+              directly over the SCA-conform interface by stripe.js.
         """
-        TransactionLog = Pool().get('payment_gateway.transaction.log')
-
-        stripe.api_key = self.gateway.stripe_api_key
-
-        charge_data = self.get_stripe_charge_data(card_info=card_info)
-        charge_data['idempotency_key'] = 'auth_%s' % self.uuid
-        charge_data['capture'] = False
-
-        try:
-            charge = stripe.Charge.create(**charge_data)
-        except (
-            stripe.error.CardError, stripe.error.InvalidRequestError,
-            stripe.error.AuthenticationError, stripe.error.APIConnectionError,
-            stripe.error.StripeError
-        ), exc:
-            self.state = 'failed'
-            self.save()
-            TransactionLog.serialize_and_create(self, exc.json_body)
-        else:
-            if charge.status == 'succeeded':
-                self.state = 'authorized'
-            else:
-                self.state = 'failed'
-            self.provider_reference = charge.id
-            self.save()
-            TransactionLog.create([{
-                'transaction': self,
-                'log': unicode(charge),
-            }])
+        self.state = 'authorized'
+        self.save()
 
     def settle_stripe(self):
         """
         Settle an authorized charge
+
+        20190613:
+            - just set the state for compatibility behavior, we charge
+              directly over the SCA-conform interface by stripe.js.
         """
-        TransactionLog = Pool().get('payment_gateway.transaction.log')
-
-        assert self.state == 'authorized'
-
-        stripe.api_key = self.gateway.stripe_api_key
-
-        try:
-            charge = stripe.Charge.retrieve(self.provider_reference)
-            charge = charge.capture(amount=self.stripe_amount)
-        except (
-            stripe.error.InvalidRequestError,
-            stripe.error.AuthenticationError, stripe.error.APIConnectionError,
-            stripe.error.StripeError
-        ), exc:
-            self.state = 'failed'
-            self.save()
-            TransactionLog.serialize_and_create(self, exc.json_body)
-        else:
-            if charge.status == 'succeeded':
-                self.state = 'completed'
-            else:
-                self.state = 'failed'
-            self.provider_reference = charge.id
-            self.save()
-            TransactionLog.create([{
-                'transaction': self,
-                'log': unicode(charge),
-            }])
-            self.safe_post()
+        self.state = 'completed'
+        self.save()
+        self.safe_post()
 
     def capture_stripe(self, card_info=None):
         """
         Capture using stripe.
+
+        20190613:
+            - just set the state for compatibility behavior, we charge
+              directly over the SCA-conform interface by stripe.js.
         """
-        TransactionLog = Pool().get('payment_gateway.transaction.log')
-
-        stripe.api_key = self.gateway.stripe_api_key
-
-        charge_data = self.get_stripe_charge_data(card_info=card_info)
-        charge_data['idempotency_key'] = 'capture_%s' % self.uuid
-        charge_data['capture'] = True
-
-        try:
-            charge = stripe.Charge.create(**charge_data)
-        except (
-            stripe.error.CardError, stripe.error.InvalidRequestError,
-            stripe.error.AuthenticationError, stripe.error.APIConnectionError,
-            stripe.error.StripeError
-        ), exc:
-            self.state = 'failed'
-            self.save()
-            TransactionLog.serialize_and_create(self, exc.json_body)
-        else:
-            if charge.status == 'succeeded':
-                self.state = 'completed'
-            else:
-                self.state = 'failed'
-            self.provider_reference = charge.id
-            self.save()
-            TransactionLog.create([{
-                'transaction': self,
-                'log': unicode(charge),
-            }])
-            self.safe_post()
+        self.state = 'completed'
+        self.save()
+        self.safe_post()
 
     def get_stripe_charge_data(self, card_info=None):
         """
@@ -241,6 +279,9 @@ class PaymentTransactionStripe:
         """
         Cancel this authorization or request
         """
+        # TODO migrate to PaymentIntent-API
+        raise self.raise_user_error('feature_not_available')
+
         TransactionLog = Pool().get('payment_gateway.transaction.log')
 
         if self.state != 'authorized':
@@ -267,6 +308,12 @@ class PaymentTransactionStripe:
             }])
 
     def refund_stripe(self):
+        """
+        Refund this authorization or request
+        """
+        # TODO migrate to PaymentIntent-API
+        raise self.raise_user_error('feature_not_available')
+
         TransactionLog = Pool().get('payment_gateway.transaction.log')
 
         stripe.api_key = self.gateway.stripe_api_key
