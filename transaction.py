@@ -138,9 +138,6 @@ class PaymentTransactionStripe:
         #        'MGA', 'PYG', 'RWF', 'KRW',
         #        'VUV', 'VND', 'XOF'):
         #    return int(self.amount)
-        print(self.currency_digits)
-        print(10 ** self.currency_digits)
-        print(int(self.amount * 10 ** self.currency_digits))
         return int(self.amount * 10 ** self.currency_digits)
 
     @classmethod
@@ -175,7 +172,6 @@ class PaymentTransactionStripe:
 
         try:
             intent = stripe.PaymentIntent.create(**payload)
-            print(intent)
         except (
             stripe.error.CardError, stripe.error.InvalidRequestError,
             stripe.error.AuthenticationError, stripe.error.APIConnectionError,
