@@ -97,7 +97,7 @@ class PaymentGatewayStripe:
     @ModelView.button
     def new_identifier(cls, gateways):
         for gateway in gateways:
-            gateway.webhook_identifier = uuid.uuid4().hex
+            gateway.stripe_webhook_identifier = uuid.uuid4().hex
         cls.save(gateways)
 
     @fields.depends('stripe_webhook_identifier')
